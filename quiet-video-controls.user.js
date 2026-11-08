@@ -1,74 +1,45 @@
 // ==UserScript==
 // @name         Quiet Video Controls
 // @namespace    https://github.com/zhaoweigg/browser_scripts
-// @version      1.0.0
-// @description  Stop streaming players (HBO Max, etc.) from popping up their control overlay and dimming the video whenever the mouse moves. Controls only appear after you click (or press a key).
+// @version      2.0.0
+// @description  Stop HBO Max from dimming the video when the player controls pop up. Controls still appear as usual; the video just stays at full brightness.
 // @match        *://*.max.com/*
 // @match        *://*.hbomax.com/*
 // @run-at       document-start
 // @grant        GM_registerMenuCommand
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @updateURL    https://raw.githubusercontent.com/zhaoweigg/browser_scripts/main/quiet-video-controls.user.js
+// @downloadURL  https://raw.githubusercontent.com/zhaoweigg/browser_scripts/main/quiet-video-controls.user.js
 // ==/UserScript==
 
 (function () {
   'use strict';
 
-  // How long (ms) mouse movement is let through after a click/keypress.
-  // Each allowed move extends the window, so you can use the controls freely
-  // after clicking; once the mouse sits still this long, blocking resumes.
-  const GRACE_MS = 3000;
-
-  // Hover-type events that players use to decide "the user is active, show the UI".
-  const BLOCKED_EVENTS = [
-    'mousemove', 'pointermove',
-    'mouseover', 'pointerover',
-    'mouseenter', 'pointerenter',
-  ];
-
-  // Events that count as deliberate interaction and open the grace window.
-  const UNLOCK_EVENTS = ['mousedown', 'pointerdown', 'touchstart', 'keydown', 'wheel'];
-
-  let enabled = GM_getValue('enabled', true);
-  let unlockedAt = 0;
-
-  function isVideoPlaying() {
-    for (const v of document.querySelectorAll('video')) {
-      if (!v.paused && !v.ended && v.readyState > 2 && v.offsetWidth > 200) {
-        return true;
-      }
+  // HBO Max dims the picture with two full-width gradient layers that fade in
+  // alongside the controls. Their class names come from styled-components, so
+  // match on the stable prefix rather than the hashed suffix.
+  const CSS = `
+    [class*="TopGradient-"],
+    [class*="BottomGradient-"] {
+      background: none !important;
+      background-image: none !important;
     }
-    return false;
-  }
+  `;
 
-  function shouldBlock() {
-    if (!enabled) return false;
-    const now = Date.now();
-    if (now - unlockedAt < GRACE_MS) {
-      unlockedAt = now; // keep the window open while the user is actively using the controls
-      return false;
-    }
-    // When paused/not on a player page, behave normally so menus and hover work.
-    return isVideoPlaying();
-  }
+  const style = document.createElement('style');
+  style.id = 'quiet-video-controls';
+  style.textContent = CSS;
 
-  function blocker(e) {
-    if (shouldBlock()) {
-      e.stopImmediatePropagation();
-    }
-  }
+  let enabled = GM_getValue('noDim', true);
+  const apply = () => { style.media = enabled ? 'all' : 'not all'; };
+  apply();
 
-  function unlock() {
-    unlockedAt = Date.now();
-  }
-
-  // Capture phase on window runs before any page listener (React's root listeners included).
-  for (const type of BLOCKED_EVENTS) {
-    window.addEventListener(type, blocker, { capture: true });
-  }
-  for (const type of UNLOCK_EVENTS) {
-    window.addEventListener(type, unlock, { capture: true, passive: true });
-  }
+  (function inject() {
+    const parent = document.head || document.documentElement;
+    if (parent) parent.appendChild(style);
+    else requestAnimationFrame(inject);
+  })();
 
   // ---- Toggle (Tampermonkey menu + Alt+Shift+Q) ----
   function toast(msg) {
@@ -86,7 +57,8 @@
 
   function toggle() {
     enabled = !enabled;
-    GM_setValue('enabled', enabled);
+    apply();
+    GM_setValue('noDim', enabled);
     toast(`Quiet Video Controls: ${enabled ? 'ON' : 'OFF'}`);
   }
 
