@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Speaker Skip
 // @namespace    https://github.com/zhaoweigg/browser_scripts
-// @version      1.0.3
+// @version      1.0.4
 // @description  Adds a button to YouTube's player that skips every part where one chosen person talks. Needs the speaker-skip helper running on this Mac (see speaker-skip/README.md).
 // @match        https://www.youtube.com/*
 // @run-at       document-idle
@@ -25,6 +25,7 @@
   };
 
   const POLL_MS = 2000;
+  const MAX_FAILS = 8;
   // Skip a little before the end of a range so the next speaker's first word isn't clipped.
   const END_MARGIN = 0.3;
 
@@ -124,7 +125,7 @@
     } else if (cur.state === 'error') {
       b.classList.add('ss-err');
       b.textContent = `Skip ${who}: error`;
-      b.title = `${cur.message}\nClick twice to retry.` +
+      b.title = `${cur.message}\nClick to retry.` +
         (cur.message === 'helper not running' ? '\nStart it: see speaker-skip/README.md' : '');
     } else if (cur.ranges) {
       b.classList.add('ss-on');
@@ -205,22 +206,31 @@
       } else if (r.state !== 'error') {
         me.timer = setTimeout(() => poll(false), POLL_MS);
       }
+      me.fails = 0;
     } catch (err) {
-      if (cur !== me) return;
-      me.state = 'error';
-      me.message = err.message;
+      if (cur !== me || !me.enabled) return;
+      // A busy helper can miss a request or two; only give up after several in a row.
+      me.fails = (me.fails || 0) + 1;
+      if (me.fails < MAX_FAILS) {
+        me.timer = setTimeout(() => poll(start), POLL_MS);
+      } else {
+        me.state = 'error';
+        me.message = err.message;
+      }
     }
     render();
   }
 
   function toggle() {
     if (!cur) return;
-    cur.enabled = !cur.enabled;
+    // Clicking an errored button retries instead of switching off.
+    cur.enabled = cur.enabled && cur.state === 'error' ? true : !cur.enabled;
     GM_setValue('enabled', cur.enabled);
     stopPolling();
     if (cur.enabled) {
       cur.state = null;
       cur.ranges = null;
+      cur.fails = 0;
       poll(true);
     }
     render();

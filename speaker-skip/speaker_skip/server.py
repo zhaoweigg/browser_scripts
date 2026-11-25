@@ -9,6 +9,8 @@ random web pages can't trigger downloads; Tampermonkey's GM_xmlhttpRequest can.
 """
 
 import json
+import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -30,7 +32,7 @@ def _touch():
     global _last_seen
     now = time.time()
     if now - _last_seen > 600:
-        print(time.strftime("%F %T"), "userscript connected", flush=True)
+        _log("userscript connected")
     _last_seen = now
 
 
@@ -56,14 +58,38 @@ def _set(vid, **kw):
         _jobs.setdefault(vid, {}).update(kw)
 
 
+def _log(*args):
+    print(time.strftime("%F %T"), *args, flush=True)
+
+
 def _run(vid):
+    """Analyze in a child process: the analysis holds Python's lock for long stretches,
+    which would otherwise freeze this server and the menu-bar icon."""
     try:
         with _work_lock:
-            result = pipeline.analyze_video(vid, status=lambda s, p: _set(vid, state=s, progress=round(p, 3)))
-        _set(vid, state="done", progress=1.0, result=result)
+            _log("analyzing", vid)
+            proc = subprocess.Popen([sys.executable, "-m", "speaker_skip", "worker", vid],
+                                    cwd=str(pipeline.ROOT), stdout=subprocess.PIPE, text=True)
+            message = None
+            for line in proc.stdout:
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                if ev.get("state") == "error":
+                    message = ev.get("message")
+                elif ev.get("state") != "done":
+                    _set(vid, state=ev.get("state"), progress=ev.get("progress", 0.0))
+            code = proc.wait()
+        if code == 0 and pipeline.load_result(vid):
+            _log("done", vid)
+            _set(vid, state="done", progress=1.0)
+        else:
+            _log("failed", vid, message or f"exit {code}")
+            _set(vid, state="error", message=message or f"analysis stopped unexpectedly (exit {code})")
     except Exception as e:  # report to the userscript instead of dying
         traceback.print_exc()
-        _set(vid, state="error", message=str(e).strip().splitlines()[-1][:300] if str(e).strip() else repr(e))
+        _set(vid, state="error", message=str(e)[:300] or repr(e))
 
 
 def status(vid, start=False):
@@ -85,7 +111,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # the page went away before we answered
 
     def do_GET(self):
         if self.headers.get("X-Speaker-Skip") != "1":

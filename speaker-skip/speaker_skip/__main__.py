@@ -19,6 +19,25 @@ def main(argv):
         print(json.dumps({k: r[k] for k in ("duration", "speakers")}, ensure_ascii=False, indent=1))
         for name, ranges in r["skip"].items():
             print(f"{name}: {len(ranges)} ranges, {sum(e - s for s, e in ranges) / 60:.1f} min")
+    elif len(argv) == 2 and argv[0] == "worker":
+        # Used by the helper: one JSON progress line per change on stdout.
+        import traceback
+        from .pipeline import analyze_video
+        last = [None]
+
+        def report(state, progress):
+            cur = (state, round(progress, 2))
+            if cur != last[0]:
+                last[0] = cur
+                print(json.dumps({"state": state, "progress": cur[1]}), flush=True)
+
+        try:
+            analyze_video(argv[1], status=report)
+        except Exception as e:
+            traceback.print_exc()
+            text = str(e).strip()
+            print(json.dumps({"state": "error", "message": (text.splitlines()[-1] if text else repr(e))[:300]}), flush=True)
+            return 1
     elif argv[:1] == ["serve"]:
         from .server import serve
         serve(menubar="--no-menubar" not in argv)
