@@ -11,9 +11,19 @@ Two pieces:
   later episodes get analyzed as soon as you open them.
 - **This folder**: a small helper on `127.0.0.1:8787` that does the analysis, because a web
   page can't get a YouTube video's full audio on its own. For each video it downloads the
-  audio (yt-dlp), finds who speaks when (pyannote segmentation + 3D-Speaker CAM++ voice
-  embeddings, via sherpa-onnx), and matches each voice against enrolled voiceprints. Results
-  are cached in `data/results/`, so each video is analyzed once. The audio is deleted afterwards.
+  audio track (yt-dlp) and works out where each enrolled person talks. Results are cached in
+  `data/results/`, so each video is analyzed once. The audio is deleted afterwards.
+
+How the analysis works:
+
+- **With a transcript (the normal case, about 30 s for a 75-minute episode):** the video's
+  captions say when each line is spoken. Each line's audio is matched against the enrolled
+  voiceprints (3D-Speaker CAM++ embeddings via sherpa-onnx), the labels are smoothed across
+  neighbouring lines, and each voiceprint is refined with the lines that are clearly that
+  person's in this episode. Only the caption timing is used, never the text.
+- **Without a transcript (about 4 min):** full speaker diarization (pyannote segmentation +
+  clustering), then each cluster is matched against the voiceprints. Force this with
+  `analyze VIDEO_ID --full`.
 
 The helper runs as a process named **SpeakerSkip** and shows an icon in the macOS menu bar:
 a skip-forward symbol while idle, a waveform with a percentage while analyzing. Its menu
@@ -56,10 +66,14 @@ the enrolled voice name. The helper computes skip ranges for every enrolled voic
 
 In `speaker_skip/speakers.py`:
 
-- `MATCH_THRESHOLD`: how similar a voice must be to a voiceprint to count as that person.
 - `skip_ranges(...)`: `min_len` (shortest stretch worth skipping, default 2 s), `merge_gap`
   (pauses bridged inside one turn), `other_min` (how long someone else must talk to cut a
   skip short; shorter "嗯/对" back-channels are ignored).
+- Transcript method: `SWITCH_PENALTY` (higher = fewer speaker changes between lines),
+  `UNKNOWN_SCORE` (lines matching nobody this well are left alone), and
+  `SHORT_MIN_SIM` / `SHORT_MIN_MARGIN` (how clear a match must be before a skip shorter
+  than `SHORT_RANGE` seconds is allowed; raise them to skip less during crosstalk).
+- Full method: `MATCH_THRESHOLD` (how similar a voice cluster must be to a voiceprint).
 
 After changing analysis code, bump `RESULT_VERSION` in `pipeline.py` so cached results are redone.
 

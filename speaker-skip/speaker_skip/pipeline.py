@@ -5,9 +5,9 @@ from pathlib import Path
 
 import numpy as np
 
-from . import audio, speakers
+from . import audio, speakers, transcript
 
-RESULT_VERSION = 2  # bump when analysis changes, so cached results get redone
+RESULT_VERSION = 3  # bump when analysis changes, so cached results get redone
 
 ROOT = speakers.ROOT
 DATA = ROOT / "data"
@@ -48,6 +48,48 @@ def analyze(samples: np.ndarray, progress=None) -> dict:
     }
 
 
+def analyze_transcript(samples: np.ndarray, cues, progress=None) -> dict:
+    """Fast path: the transcript says when each line is spoken, the audio says by whom."""
+    vps = speakers.load_voiceprints()
+    names = list(vps)
+    embs = speakers.cue_embeddings(samples, cues, progress=progress)
+    labels, sims = speakers.label_cues(embs, cues, vps)
+
+    segs = [(s, e, i) for i, (s, e) in enumerate(cues)]
+    lab = {i: (name,) for i, name in enumerate(labels)}
+    skip = {name: speakers.confident_ranges(speakers.skip_ranges(segs, lab, name), cues, sims, k)
+            for k, name in enumerate(names)}
+
+    info = []
+    for k, name in enumerate(names + [None]):
+        idx = [i for i, x in enumerate(labels) if x == name]
+        if not idx:
+            continue
+        dur = np.array([cues[i][1] - cues[i][0] for i in idx])
+        entry = {"name": name, "seconds": round(float(dur.sum()), 1)}
+        if name is not None:
+            entry["similarity"] = round(float((sims[idx, k] * dur).sum() / dur.sum()), 3)
+        info.append(entry)
+    info.sort(key=lambda x: -x["seconds"])
+
+    merged = []  # consecutive lines by the same person become one segment
+    for (s, e), name in zip(cues, labels):
+        name = name or "unknown"
+        if merged and merged[-1][2] == name and s - merged[-1][1] < 1.0:
+            merged[-1][1] = round(e, 2)
+        else:
+            merged.append([round(s, 2), round(e, 2), name])
+
+    return {
+        "version": RESULT_VERSION,
+        "method": "transcript",
+        "duration": round(len(samples) / audio.SAMPLE_RATE, 2),
+        "speakers": info,
+        "skip": skip,
+        "segments": merged,
+    }
+
+
 def result_path(video_id: str) -> Path:
     return RESULTS_DIR / f"{audio.check_video_id(video_id)}.json"
 
@@ -60,15 +102,30 @@ def load_result(video_id: str):
     return r if r.get("version") == RESULT_VERSION else None
 
 
-def analyze_video(video_id: str, status=None, keep_audio=False) -> dict:
-    """Download, analyze and cache one video. `status(state, progress)` reports progress."""
+def analyze_video(video_id: str, status=None, keep_audio=False, method="auto") -> dict:
+    """Download, analyze and cache one video. `status(state, progress)` reports progress.
+
+    method "auto" uses the transcript when the video has one and falls back to full
+    diarization otherwise; "full" forces the slow method."""
     status = status or (lambda *_: None)
     status("downloading", 0.0)
-    path = audio.download_audio(video_id, AUDIO_DIR, progress=lambda p: status("downloading", p))
+    path, info = audio.fetch(video_id, AUDIO_DIR, progress=lambda p: status("downloading", p))
+    cues, note = None, "full analysis requested"
+    if method != "full":
+        try:
+            cues, note = transcript.fetch_cues(video_id, info)
+        except Exception as e:  # any transcript trouble just means the slow path
+            cues, note = None, f"transcript unavailable: {e}"
     status("decoding", 0.0)
     samples = audio.decode(path)
     status("analyzing", 0.0)
-    result = analyze(samples, progress=lambda p: status("analyzing", p))
+    report = lambda p: status("analyzing", p)
+    if cues:
+        result = analyze_transcript(samples, cues, progress=report)
+    else:
+        result = analyze(samples, progress=report)
+        result["method"] = "full"
+    result["note"] = note
     result["videoId"] = video_id
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     result_path(video_id).write_text(json.dumps(result, ensure_ascii=False, indent=1))

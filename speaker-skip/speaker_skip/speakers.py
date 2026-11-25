@@ -131,3 +131,107 @@ def skip_ranges(segments, labels, target, merge_gap=1.0, min_len=2.0, other_min=
             pieces = nxt
         result.extend(p for p in pieces if p[1] - p[0] >= min_len)
     return [[round(s, 2), round(e, 2)] for s, e in result]
+
+
+# ---------- transcript-based labelling ----------
+# Each caption line is matched against the enrolled voices directly, instead of
+# diarizing the whole recording first.
+
+MIN_WINDOW = 2.0      # seconds of audio used to judge a line (shorter lines are widened)
+MAX_WINDOW = 6.0
+UNKNOWN_SCORE = 0.35  # a line whose best match is below this stays unlabelled
+SWITCH_PENALTY = 0.3  # how much evidence it takes to change speaker between lines
+ADAPT_MARGIN = 0.15   # lines this clearly one person's are used to refine their voiceprint
+ADAPT_MIN_SECONDS = 30.0
+
+
+def cue_embeddings(samples: np.ndarray, cues, progress=None) -> np.ndarray:
+    """One voice embedding per caption line; rows are zero where there is no usable audio."""
+    total = len(samples) / SAMPLE_RATE
+    out = np.zeros((len(cues), extractor().dim), dtype=np.float32)
+    for i, (s, e) in enumerate(cues):
+        half = min(max(e - s, MIN_WINDOW), MAX_WINDOW) / 2
+        mid = (s + e) / 2
+        a, b = max(0.0, mid - half), min(total, mid + half)
+        chunk = samples[int(a * SAMPLE_RATE): int(b * SAMPLE_RATE)]
+        if len(chunk) >= SAMPLE_RATE // 2 and float(np.sqrt(np.mean(chunk ** 2))) > 1e-3:
+            out[i] = embed(chunk)
+        if progress and i % 20 == 0:
+            progress(i / len(cues))
+    return out
+
+
+def _viterbi(scores: np.ndarray, weights: np.ndarray, penalty: float) -> np.ndarray:
+    """Best label per line: maximise weighted score minus a penalty for every change."""
+    n, k = scores.shape
+    best = np.zeros((n, k), dtype=np.float64)
+    back = np.zeros((n, k), dtype=np.int32)
+    best[0] = scores[0] * weights[0]
+    for t in range(1, n):
+        stay = best[t - 1]
+        j = int(np.argmax(stay))
+        switch = stay[j] - penalty
+        back[t] = np.where(stay >= switch, np.arange(k), j)
+        best[t] = np.maximum(stay, switch) + scores[t] * weights[t]
+    path = np.zeros(n, dtype=np.int32)
+    path[-1] = int(np.argmax(best[-1]))
+    for t in range(n - 1, 0, -1):
+        path[t - 1] = back[t, path[t]]
+    return path
+
+
+def label_cues(embs: np.ndarray, cues, voiceprints, adapt=True):
+    """Return (labels, sims): labels[i] is a voice name or None for caption line i."""
+    names = list(voiceprints)
+    prints = np.stack([voiceprints[n] for n in names])
+    dur = np.array([e - s for s, e in cues])
+    weights = np.clip(dur, 0.5, 3.0)
+    valid = np.linalg.norm(embs, axis=1) > 0
+
+    def run(prints):
+        sims = embs @ prints.T
+        scores = np.concatenate([sims, np.full((len(cues), 1), UNKNOWN_SCORE)], axis=1)
+        scores[~valid, :-1] = 0.0
+        return sims, _viterbi(scores, weights, SWITCH_PENALTY)
+
+    sims, path = run(prints)
+    if adapt:
+        # Voices sound a bit different in every recording. Refine each voiceprint with the
+        # lines that are clearly that person's in this episode, then label again.
+        top2 = np.sort(sims, axis=1)[:, -2:] if len(names) > 1 else np.hstack([np.zeros_like(sims), sims])
+        margin = top2[:, 1] - top2[:, 0]
+        refined = prints.copy()
+        for k in range(len(names)):
+            sure = valid & (path == k) & (np.argmax(sims, axis=1) == k) & (margin >= ADAPT_MARGIN)
+            if dur[sure].sum() >= ADAPT_MIN_SECONDS:
+                m = (embs[sure] * weights[sure, None]).sum(axis=0)
+                m = prints[k] + m / (np.linalg.norm(m) + 1e-9)
+                refined[k] = m / (np.linalg.norm(m) + 1e-9)
+        sims, path = run(refined)
+    labels = [names[k] if k < len(names) else None for k in path]
+    return labels, sims
+
+
+SHORT_RANGE = 6.0        # skips shorter than this must be a clear match
+SHORT_MIN_SIM = 0.58
+SHORT_MIN_MARGIN = 0.10
+
+
+def confident_ranges(ranges, cues, sims, k):
+    """Drop short skip ranges whose voice match is weak or close to another person's.
+
+    Cutting someone else off by mistake is worse than letting a short remark through."""
+    starts = np.array([c[0] for c in cues])
+    ends = np.array([c[1] for c in cues])
+    keep = []
+    for s, e in ranges:
+        if e - s < SHORT_RANGE:
+            w = np.clip(np.minimum(ends, e) - np.maximum(starts, s), 0, None)
+            if w.sum() <= 0:
+                continue
+            m = (sims * w[:, None]).sum(axis=0) / w.sum()
+            others = np.delete(m, k)
+            if m[k] < SHORT_MIN_SIM or (len(others) and m[k] - others.max() < SHORT_MIN_MARGIN):
+                continue
+        keep.append([s, e])
+    return keep

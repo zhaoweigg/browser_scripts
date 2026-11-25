@@ -18,13 +18,13 @@ def check_video_id(video_id: str) -> str:
     return video_id
 
 
-def download_audio(video_id: str, out_dir: Path, progress=None) -> Path:
-    """Download the smallest Opus audio stream (plenty for speech). Returns the file path."""
+def fetch(video_id: str, out_dir: Path, progress=None):
+    """Download the smallest Opus audio stream (plenty for speech).
+
+    Returns (audio_path, info); `info` is yt-dlp's metadata, which also lists the captions."""
     check_video_id(video_id)
     out_dir.mkdir(parents=True, exist_ok=True)
     existing = [p for p in out_dir.glob(f"{video_id}.*") if not p.name.endswith(".part")]
-    if existing:
-        return existing[0]
 
     def hook(d):
         if progress and d.get("status") == "downloading":
@@ -41,8 +41,13 @@ def download_audio(video_id: str, out_dir: Path, progress=None) -> Path:
         "progress_hooks": [hook],
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=True)
-        return Path(ydl.prepare_filename(info))
+        info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=not existing)
+        return (existing[0] if existing else Path(ydl.prepare_filename(info))), info
+
+
+def download_audio(video_id: str, out_dir: Path, progress=None) -> Path:
+    existing = [p for p in out_dir.glob(f"{check_video_id(video_id)}.*") if not p.name.endswith(".part")]
+    return existing[0] if existing else fetch(video_id, out_dir, progress)[0]
 
 
 def decode(path: Path) -> np.ndarray:
