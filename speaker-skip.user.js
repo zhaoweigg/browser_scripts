@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Speaker Skip
 // @namespace    https://github.com/zhaoweigg/browser_scripts
-// @version      1.0.4
+// @version      1.1.0
 // @description  Adds a button to YouTube's player that skips every part where one chosen person talks. Needs the speaker-skip helper running on this Mac (see speaker-skip/README.md).
 // @match        https://www.youtube.com/*
 // @run-at       document-idle
@@ -127,6 +127,11 @@
       b.textContent = `Skip ${who}: error`;
       b.title = `${cur.message}\nClick to retry.` +
         (cur.message === 'helper not running' ? '\nStart it: see speaker-skip/README.md' : '');
+    } else if (cur.ranges && cur.partial) {
+      // Still analyzing, but the part done so far is already being skipped.
+      b.classList.add('ss-on');
+      b.textContent = `Skipping ${who} · ${Math.round((cur.progress || 0) * 100)}%`;
+      b.title = `Analyzed up to ${fmtTime(cur.upto)}; skipping ${who} there already. Click to turn off.`;
     } else if (cur.ranges) {
       b.classList.add('ss-on');
       const mins = cur.ranges.reduce((t, [s, e]) => t + (e - s), 0) / 60;
@@ -134,21 +139,16 @@
       b.title = `${cur.ranges.length} parts, ${mins.toFixed(1)} min skipped. Click to turn off.`;
     } else {
       b.classList.add('ss-busy');
-      const label = { queued: 'Waiting', downloading: 'Downloading', decoding: 'Decoding', analyzing: 'Analyzing' }[cur.state] || 'Starting';
-      b.textContent = `${label} ${Math.round(overallProgress() * 100)}%`;
+      const label = { queued: 'Waiting', downloading: 'Starting', decoding: 'Decoding', analyzing: 'Analyzing' }[cur.state] || 'Starting';
+      b.textContent = cur.state === 'analyzing' ? `${label} ${Math.round((cur.progress || 0) * 100)}%` : `${label}…`;
       b.title = `Finding where ${who} talks. Click to cancel.`;
     }
     renderMarks();
   }
 
-  function overallProgress() {
-    const p = cur.progress || 0;
-    switch (cur.state) {
-      case 'downloading': return 0.4 * p;
-      case 'decoding': return 0.42;
-      case 'analyzing': return 0.45 + 0.55 * p;
-      default: return 0;
-    }
+  function fmtTime(sec) {
+    const t = Math.floor(sec || 0);
+    return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
   }
 
   function renderMarks() {
@@ -198,12 +198,19 @@
       me.progress = r.progress;
       me.message = r.message;
       if (r.state === 'done') {
+        me.partial = false;
         me.ranges = (r.result.skip && r.result.skip[me.cfg.skip]) || [];
         if (!r.result.skip || !(me.cfg.skip in r.result.skip)) {
           me.state = 'error';
           me.message = `No voiceprint named ${me.cfg.skip} in the helper`;
         }
       } else if (r.state !== 'error') {
+        // The helper analyzes while it downloads and shares what it has so far.
+        if (r.partial && r.partial.skip && me.cfg.skip in r.partial.skip) {
+          me.partial = true;
+          me.upto = r.partial.upto;
+          me.ranges = r.partial.skip[me.cfg.skip];
+        }
         me.timer = setTimeout(() => poll(false), POLL_MS);
       }
       me.fails = 0;
@@ -230,6 +237,7 @@
     if (cur.enabled) {
       cur.state = null;
       cur.ranges = null;
+      cur.partial = false;
       cur.fails = 0;
       poll(true);
     }

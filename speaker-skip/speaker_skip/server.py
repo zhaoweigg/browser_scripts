@@ -2,6 +2,8 @@
 
 GET /health                      -> {"ok": true, "voices": [...]}
 GET /analyze?v=VIDEO_ID[&start=1] -> {"state": ..., "progress": 0..1, "result": {...}}
+    While a video is being analyzed the reply also carries "partial": {"upto": seconds,
+    "skip": {name: [[start, end], ...]}} with the skip ranges found so far.
 
 Requests must carry the header `X-Speaker-Skip: 1`. Browsers can't add a custom header
 to a cross-site request without a CORS preflight (which this server never approves), so
@@ -39,7 +41,8 @@ def _touch():
 def snapshot():
     """Current state for the menu-bar item."""
     with _jobs_lock:
-        jobs = {vid: dict(j) for vid, j in _jobs.items()}
+        jobs = {vid: {k: v for k, v in j.items() if k != "partial"} | {"streaming": bool(j.get("partial"))}
+                for vid, j in _jobs.items()}
     active = [(vid, j) for vid, j in jobs.items() if j.get("state") not in ("done", "error", None)]
     running = [x for x in active if x[1].get("state") != "queued"]
     errors = [(vid, j) for vid, j in jobs.items() if j.get("state") == "error"]
@@ -76,14 +79,16 @@ def _run(vid):
                     ev = json.loads(line)
                 except ValueError:
                     continue
-                if ev.get("state") == "error":
+                if "partial" in ev:  # skip ranges for the part analyzed so far
+                    _set(vid, partial=ev["partial"])
+                elif ev.get("state") == "error":
                     message = ev.get("message")
                 elif ev.get("state") != "done":
                     _set(vid, state=ev.get("state"), progress=ev.get("progress", 0.0))
             code = proc.wait()
         if code == 0 and pipeline.load_result(vid):
             _log("done", vid)
-            _set(vid, state="done", progress=1.0)
+            _set(vid, state="done", progress=1.0, partial=None)
         else:
             _log("failed", vid, message or f"exit {code}")
             _set(vid, state="error", message=message or f"analysis stopped unexpectedly (exit {code})")

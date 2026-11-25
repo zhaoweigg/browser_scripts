@@ -1,7 +1,8 @@
 """Fetch a YouTube video's audio track and decode it to 16 kHz mono float32."""
 
-import os
 import re
+import threading
+import time
 from pathlib import Path
 
 import av
@@ -48,6 +49,75 @@ def fetch(video_id: str, out_dir: Path, progress=None):
 def download_audio(video_id: str, out_dir: Path, progress=None) -> Path:
     existing = [p for p in out_dir.glob(f"{check_video_id(video_id)}.*") if not p.name.endswith(".part")]
     return existing[0] if existing else fetch(video_id, out_dir, progress)[0]
+
+
+YDL_OPTS = {
+    "format": "249/250/251/bestaudio",
+    "quiet": True,
+    "no_warnings": True,
+    "noprogress": True,
+}
+
+
+class Download:
+    """Audio download that can be decoded while it is still arriving.
+
+    `info` (yt-dlp metadata, incl. captions) is available right away; `samples()` yields
+    16 kHz mono chunks as the file grows."""
+
+    def __init__(self, video_id: str, out_dir: Path):
+        check_video_id(video_id)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        self._ydl = yt_dlp.YoutubeDL({**YDL_OPTS, "outtmpl": str(out_dir / "%(id)s.%(ext)s")})
+        self.info = self._ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
+        self.path = Path(self._ydl.prepare_filename(self.info))
+        self._part = Path(str(self.path) + ".part")
+        self._done = threading.Event()
+        self.error = None
+
+    def start(self):
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        try:
+            if not self.path.exists():
+                self._ydl.process_info(self.info)
+        except Exception as e:
+            self.error = e
+        finally:
+            self._done.set()
+
+    def wait(self):
+        self._done.wait()
+        if self.error:
+            raise self.error
+        return self.path
+
+    def read(self, n):  # file-like for PyAV: blocks until more of the file has arrived
+        while True:
+            data = self._file.read(n)
+            if data or self._done.is_set():
+                return data or self._file.read(n)
+            time.sleep(0.1)
+
+    def samples(self):
+        while not (self._part.exists() or self.path.exists() or self._done.is_set()):
+            time.sleep(0.05)
+        if self.error:
+            raise self.error
+        self._file = open(self.path if self.path.exists() else self._part, "rb")
+        try:
+            resampler = av.AudioResampler(format="flt", layout="mono", rate=SAMPLE_RATE)
+            with av.open(self) as container:
+                for frame in container.decode(container.streams.audio[0]):
+                    for out in resampler.resample(frame):
+                        yield out.to_ndarray().reshape(-1)
+                for out in resampler.resample(None):
+                    yield out.to_ndarray().reshape(-1)
+        finally:
+            self._file.close()
+        if self.error:
+            raise self.error
 
 
 def decode(path: Path) -> np.ndarray:

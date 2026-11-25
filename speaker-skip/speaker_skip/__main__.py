@@ -32,8 +32,11 @@ def main(argv):
                 last[0] = cur
                 print(json.dumps({"state": state, "progress": cur[1]}), flush=True)
 
+        def partial(data):
+            print(json.dumps({"partial": data}), flush=True)
+
         try:
-            analyze_video(argv[1], status=report)
+            analyze_video(argv[1], status=report, partial=partial)
         except Exception as e:
             traceback.print_exc()
             text = str(e).strip()

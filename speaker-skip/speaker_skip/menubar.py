@@ -96,7 +96,7 @@ class Controller(AppKit.NSObject):
         if active:
             vid, job = active
             state = job.get("state")
-            base, span = STAGE.get(state, (0.0, 0.0))
+            base, span = (0.0, 1.0) if job.get("streaming") else STAGE.get(state, (0.0, 0.0))
             pct = round(100 * (base + span * (job.get("progress") or 0.0)))
             button.setImage_(self.busy_icon)
             button.setTitle_(f" {pct}%" if self.busy_icon else f"Skip {pct}%")

@@ -139,10 +139,32 @@ def skip_ranges(segments, labels, target, merge_gap=1.0, min_len=2.0, other_min=
 
 MIN_WINDOW = 2.0      # seconds of audio used to judge a line (shorter lines are widened)
 MAX_WINDOW = 6.0
-UNKNOWN_SCORE = 0.35  # a line whose best match is below this stays unlabelled
+UNKNOWN_SCORE = 0.45  # a line whose best match is below this stays unlabelled
 SWITCH_PENALTY = 0.3  # how much evidence it takes to change speaker between lines
 ADAPT_MARGIN = 0.15   # lines this clearly one person's are used to refine their voiceprint
+ADAPT_MIN_SIM = 0.55
 ADAPT_MIN_SECONDS = 30.0
+ADAPT_MAX_DRIFT = 0.8  # a refined voiceprint must stay this similar to the enrolled one
+GUEST_BELOW = 0.45     # lines matching every enrolled voice worse than this may be a guest
+GUEST_COHERENCE = 0.5  # how alike lines must sound to be grouped as one guest
+GUEST_MIN_SECONDS = 45.0
+GUEST_KNOWN_SHARE = 0.5  # a found voice is a guest only if less than this share of its lines match enrolled people
+GUEST_MAX = 4
+
+
+def cue_window(s, e, total):
+    """The stretch of audio used to judge the caption line (s, e)."""
+    half = min(max(e - s, MIN_WINDOW), MAX_WINDOW) / 2
+    mid = (s + e) / 2
+    return max(0.0, mid - half), min(total, mid + half)
+
+
+def embed_window(samples: np.ndarray, a, b) -> np.ndarray:
+    """Voice embedding of samples[a:b] (seconds); zeros when there is no usable audio."""
+    chunk = samples[int(a * SAMPLE_RATE): int(b * SAMPLE_RATE)]
+    if len(chunk) >= SAMPLE_RATE // 2 and float(np.sqrt(np.mean(chunk ** 2))) > 1e-3:
+        return embed(chunk)
+    return np.zeros(extractor().dim, dtype=np.float32)
 
 
 def cue_embeddings(samples: np.ndarray, cues, progress=None) -> np.ndarray:
@@ -150,12 +172,7 @@ def cue_embeddings(samples: np.ndarray, cues, progress=None) -> np.ndarray:
     total = len(samples) / SAMPLE_RATE
     out = np.zeros((len(cues), extractor().dim), dtype=np.float32)
     for i, (s, e) in enumerate(cues):
-        half = min(max(e - s, MIN_WINDOW), MAX_WINDOW) / 2
-        mid = (s + e) / 2
-        a, b = max(0.0, mid - half), min(total, mid + half)
-        chunk = samples[int(a * SAMPLE_RATE): int(b * SAMPLE_RATE)]
-        if len(chunk) >= SAMPLE_RATE // 2 and float(np.sqrt(np.mean(chunk ** 2))) > 1e-3:
-            out[i] = embed(chunk)
+        out[i] = embed_window(samples, *cue_window(s, e, total))
         if progress and i % 20 == 0:
             progress(i / len(cues))
     return out
@@ -180,13 +197,59 @@ def _viterbi(scores: np.ndarray, weights: np.ndarray, penalty: float) -> np.ndar
     return path
 
 
+def _unit(v):
+    return v / (np.linalg.norm(v) + 1e-9)
+
+
+def find_guests(embs, weights, candidates, max_guests=GUEST_MAX):
+    """Voiceprints for people in this recording who match no enrolled voice.
+
+    `candidates` marks the lines that match nobody well. Lines that sound alike are
+    grouped; a group with enough speech becomes a guest voice, so that person competes
+    for their own lines instead of being mistaken for the nearest enrolled voice."""
+    guests = []
+    left = candidates.copy()
+    for _ in range(max_guests):
+        if weights[left].sum() < GUEST_MIN_SECONDS:
+            break
+        # Seed with the line that has the most similar neighbours, then tighten.
+        sub = np.flatnonzero(left)
+        pick = sub if len(sub) <= 400 else sub[np.linspace(0, len(sub) - 1, 400).astype(int)]
+        density = ((embs[pick] @ embs[sub].T) > GUEST_COHERENCE).astype(np.float32) @ weights[sub]
+        centre = embs[pick[int(np.argmax(density))]]
+        for _ in range(4):
+            members = left & (embs @ centre >= GUEST_COHERENCE)
+            if not members.any():
+                break
+            centre = _unit((embs[members] * weights[members, None]).sum(axis=0))
+        members = left & (embs @ centre >= GUEST_COHERENCE)
+        if weights[members].sum() < GUEST_MIN_SECONDS:
+            break
+        guests.append(centre)
+        left &= ~members
+    return guests
+
+
 def label_cues(embs: np.ndarray, cues, voiceprints, adapt=True):
-    """Return (labels, sims): labels[i] is a voice name or None for caption line i."""
+    """Return (labels, sims): labels[i] is an enrolled voice name, or None (guest/unknown),
+    for caption line i; sims[i] are the line's similarities to the enrolled voices."""
     names = list(voiceprints)
-    prints = np.stack([voiceprints[n] for n in names])
+    enrolled = np.stack([voiceprints[n] for n in names])
     dur = np.array([e - s for s, e in cues])
     weights = np.clip(dur, 0.5, 3.0)
     valid = np.linalg.norm(embs, axis=1) > 0
+
+    # Guests: voices in this recording that match no enrolled voice. Each gets its own
+    # voiceprint so the guest competes for their own lines instead of being mistaken for
+    # the nearest enrolled voice. A found voice whose lines mostly do match enrolled
+    # people is just leftovers (crosstalk, mumbling) and is ignored.
+    best = (embs @ enrolled.T).max(axis=1)
+    prints = list(enrolled)
+    for g in find_guests(embs, weights, valid & (best < GUEST_BELOW)):
+        alike = valid & (embs @ g >= GUEST_COHERENCE)
+        if dur[alike & (best >= GUEST_BELOW)].sum() < GUEST_KNOWN_SHARE * dur[alike].sum():
+            prints.append(g)
+    prints = np.stack(prints)
 
     def run(prints):
         sims = embs @ prints.T
@@ -196,25 +259,30 @@ def label_cues(embs: np.ndarray, cues, voiceprints, adapt=True):
 
     sims, path = run(prints)
     if adapt:
-        # Voices sound a bit different in every recording. Refine each voiceprint with the
-        # lines that are clearly that person's in this episode, then label again.
-        top2 = np.sort(sims, axis=1)[:, -2:] if len(names) > 1 else np.hstack([np.zeros_like(sims), sims])
-        margin = top2[:, 1] - top2[:, 0]
+        # Voices sound a bit different in every recording. Refine each enrolled voiceprint
+        # with the lines that are clearly that person's here, then label again. Only strong
+        # matches count, and a refined print that drifted away from the original is dropped.
+        ranked = np.sort(sims, axis=1)
+        margin = ranked[:, -1] - (ranked[:, -2] if sims.shape[1] > 1 else 0.0)
         refined = prints.copy()
         for k in range(len(names)):
-            sure = valid & (path == k) & (np.argmax(sims, axis=1) == k) & (margin >= ADAPT_MARGIN)
+            sure = (valid & (path == k) & (np.argmax(sims, axis=1) == k)
+                    & (sims[:, k] >= ADAPT_MIN_SIM) & (margin >= ADAPT_MARGIN))
             if dur[sure].sum() >= ADAPT_MIN_SECONDS:
-                m = (embs[sure] * weights[sure, None]).sum(axis=0)
-                m = prints[k] + m / (np.linalg.norm(m) + 1e-9)
-                refined[k] = m / (np.linalg.norm(m) + 1e-9)
+                mean = _unit((embs[sure] * weights[sure, None]).sum(axis=0))
+                candidate = _unit(enrolled[k] + mean)
+                if float(candidate @ enrolled[k]) >= ADAPT_MAX_DRIFT:
+                    refined[k] = candidate
         sims, path = run(refined)
-    labels = [names[k] if k < len(names) else None for k in path]
-    return labels, sims
+
+    labels = [names[k] if k < len(names) else None for k in path]  # guests and unknown: None
+    return labels, sims[:, :len(names)]
 
 
 SHORT_RANGE = 6.0        # skips shorter than this must be a clear match
 SHORT_MIN_SIM = 0.58
 SHORT_MIN_MARGIN = 0.10
+ANY_MIN_SIM = 0.50       # no skip of any length on a match weaker than this
 
 
 def confident_ranges(ranges, cues, sims, k):
@@ -225,11 +293,13 @@ def confident_ranges(ranges, cues, sims, k):
     ends = np.array([c[1] for c in cues])
     keep = []
     for s, e in ranges:
+        w = np.clip(np.minimum(ends, e) - np.maximum(starts, s), 0, None)
+        if w.sum() <= 0:
+            continue
+        m = (sims * w[:, None]).sum(axis=0) / w.sum()
+        if m[k] < ANY_MIN_SIM:
+            continue
         if e - s < SHORT_RANGE:
-            w = np.clip(np.minimum(ends, e) - np.maximum(starts, s), 0, None)
-            if w.sum() <= 0:
-                continue
-            m = (sims * w[:, None]).sum(axis=0) / w.sum()
             others = np.delete(m, k)
             if m[k] < SHORT_MIN_SIM or (len(others) and m[k] - others.max() < SHORT_MIN_MARGIN):
                 continue

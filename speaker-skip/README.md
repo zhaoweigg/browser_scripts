@@ -16,11 +16,17 @@ Two pieces:
 
 How the analysis works:
 
-- **With a transcript (the normal case, about 30 s for a 75-minute episode):** the video's
-  captions say when each line is spoken. Each line's audio is matched against the enrolled
-  voiceprints (3D-Speaker CAM++ embeddings via sherpa-onnx), the labels are smoothed across
-  neighbouring lines, and each voiceprint is refined with the lines that are clearly that
-  person's in this episode. Only the caption timing is used, never the text.
+- **With a transcript (the normal case, under a minute for a 75-minute episode):** the
+  video's captions say when each line is spoken. Each line's audio is matched against the
+  enrolled voiceprints (3D-Speaker CAM++ embeddings via sherpa-onnx), the labels are smoothed
+  across neighbouring lines, and each voiceprint is refined with the lines that are clearly
+  that person's in this episode. Only the caption timing is used, never the text.
+  - **Streaming:** this runs while the audio is still downloading. The first minutes are
+    ready about 8 seconds after you press the button, and the helper hands the browser the
+    skip ranges found so far every 2 seconds, so skipping works before the analysis is done.
+  - **Guests:** a voice that matches none of the enrolled people (an interview guest) gets
+    its own voiceprint for that episode, so it is never mistaken for the closest-sounding
+    host. Guests and unclear lines are never skipped.
 - **Without a transcript (about 4 min):** full speaker diarization (pyannote segmentation +
   clustering), then each cluster is matched against the voiceprints. Force this with
   `analyze VIDEO_ID --full`.
@@ -70,7 +76,9 @@ In `speaker_skip/speakers.py`:
   (pauses bridged inside one turn), `other_min` (how long someone else must talk to cut a
   skip short; shorter "嗯/对" back-channels are ignored).
 - Transcript method: `SWITCH_PENALTY` (higher = fewer speaker changes between lines),
-  `UNKNOWN_SCORE` (lines matching nobody this well are left alone), and
+  `UNKNOWN_SCORE` (lines matching nobody this well are left alone), `GUEST_*` (when an
+  unmatched voice counts as a guest), `ADAPT_*` (which lines may refine a voiceprint, and
+  how far it may drift), `ANY_MIN_SIM` (no skip on a weaker match than this), and
   `SHORT_MIN_SIM` / `SHORT_MIN_MARGIN` (how clear a match must be before a skip shorter
   than `SHORT_RANGE` seconds is allowed; raise them to skip less during crosstalk).
 - Full method: `MATCH_THRESHOLD` (how similar a voice cluster must be to a voiceprint).
