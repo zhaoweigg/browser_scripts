@@ -103,6 +103,9 @@ def status(vid, start=False):
         return {"state": "done", "progress": 1.0, "result": cached}
     with _jobs_lock:
         job = dict(_jobs.get(vid, {}))
+        if job.get("state") == "done":  # its result file is gone (deleted or outdated): start over
+            _jobs.pop(vid, None)
+            job = {}
         if start and job.get("state") in (None, "error"):
             _jobs[vid] = job = {"state": "queued", "progress": 0.0}
             threading.Thread(target=_run, args=(vid,), daemon=True).start()
