@@ -27,9 +27,12 @@ How the analysis works:
   - **Guests:** a voice that matches none of the enrolled people (an interview guest) gets
     its own voiceprint for that episode, so it is never mistaken for the closest-sounding
     host. Guests and unclear lines are never skipped.
-- **Without a transcript (about 4 min):** full speaker diarization (pyannote segmentation +
-  clustering), then each cluster is matched against the voiceprints. Force this with
-  `analyze VIDEO_ID --full`.
+- **Without a transcript (new uploads and livestream recordings, before YouTube has made
+  captions):** the same method, also streaming and just as fast, but the lines are found by
+  loudness: speech between pauses, cut into pieces of at most 2 seconds (`slicer.py`).
+- **Full diarization (about 4 min):** pyannote segmentation + clustering, then each cluster
+  is matched against the voiceprints. Only used when the fast methods fail, or when forced
+  with `analyze VIDEO_ID --full`.
 
 The helper runs as a process named **SpeakerSkip** and shows an icon in the macOS menu bar:
 a skip-forward symbol while idle, a waveform with a percentage while analyzing. Its menu
@@ -82,6 +85,9 @@ In `speaker_skip/speakers.py`:
   how far it may drift), `ANY_MIN_SIM` (no skip on a weaker match than this), and
   `SHORT_MIN_SIM` / `SHORT_MIN_MARGIN` (how clear a match must be before a skip shorter
   than `SHORT_RANGE` seconds is allowed; raise them to skip less during crosstalk).
+- Without a transcript, in `speaker_skip/slicer.py`: `BELOW_SPEECH` (how far under the usual
+  speech level counts as a pause), `HANGOVER` (shortest pause that ends a line), `LINE`
+  (longest line).
 - Full method: `MATCH_THRESHOLD` (how similar a voice cluster must be to a voiceprint).
 
 After changing analysis code, bump `RESULT_VERSION` in `pipeline.py` so cached results are redone.

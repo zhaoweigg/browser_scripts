@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import audio, speakers, transcript
+from . import audio, slicer, speakers, transcript
 
 RESULT_VERSION = 5  # bump when analysis changes, so cached results get redone
 
@@ -56,7 +56,7 @@ def _skips(cues, labels, sims, names):
             for k, name in enumerate(names)}
 
 
-def _transcript_result(embs, cues, duration) -> dict:
+def _transcript_result(embs, cues, duration, method="transcript") -> dict:
     vps = speakers.load_voiceprints()
     names = list(vps)
     labels, sims = speakers.label_cues(embs, cues, vps)
@@ -83,7 +83,7 @@ def _transcript_result(embs, cues, duration) -> dict:
 
     return {
         "version": RESULT_VERSION,
-        "method": "transcript",
+        "method": method,
         "duration": round(duration, 2),
         "speakers": info,
         "skip": _skips(cues, labels, sims, names),
@@ -91,10 +91,13 @@ def _transcript_result(embs, cues, duration) -> dict:
     }
 
 
-def analyze_transcript(samples: np.ndarray, cues, progress=None) -> dict:
-    """Fast path: the transcript says when each line is spoken, the audio says by whom."""
+def analyze_transcript(samples: np.ndarray, cues=None, progress=None) -> dict:
+    """Fast path: the transcript says when each line is spoken, the audio says by whom.
+    Without a transcript (cues=None) the lines are found by loudness instead."""
+    method = "transcript" if cues else "speech"
+    cues = cues or slicer.speech_lines(samples)
     embs = speakers.cue_embeddings(samples, cues, progress=progress)
-    return _transcript_result(embs, cues, len(samples) / audio.SAMPLE_RATE)
+    return _transcript_result(embs, cues, len(samples) / audio.SAMPLE_RATE, method)
 
 
 PARTIAL_EVERY = 2.0  # seconds between partial results
@@ -102,35 +105,38 @@ PARTIAL_MIN_LINES = 30
 PARTIAL_HOLD_BACK = 6  # newest lines can still change label, so they are not published yet
 
 
-def analyze_streaming(download, cues, progress=None, partial=None) -> dict:
+def analyze_streaming(download, cues=None, progress=None, partial=None) -> dict:
     """Like analyze_transcript, but works through the audio while it downloads and reports
-    skip ranges for the part done so far via partial({"upto": seconds, "skip": {...}})."""
+    skip ranges for the part done so far via partial({"upto": seconds, "skip": {...}}).
+
+    Without a transcript (cues=None) the lines are found by loudness as the audio arrives."""
     vps = speakers.load_voiceprints()
     names = list(vps)
     sr = audio.SAMPLE_RATE
-    total = float(download.info.get("duration") or cues[-1][1])
+    find = None if cues else slicer.SpeechSlicer()
+    cues = list(cues or [])
+    total = float(download.info.get("duration") or (cues[-1][1] if cues else 0) or 3600)
     buf = np.zeros(int((total + 30) * sr), dtype=np.float32)
-    embs = np.zeros((len(cues), speakers.extractor().dim), dtype=np.float32)
+    embs = []  # one voice embedding per line, for the lines done so far
     have = 0   # samples decoded so far
-    done = 0   # caption lines embedded so far
     last = time.time()
 
     def advance(final=False):
-        nonlocal done, last
+        nonlocal last
         limit = have / sr
-        while done < len(cues):
-            a, b = speakers.cue_window(*cues[done], limit if final else total)
+        while len(embs) < len(cues):
+            a, b = speakers.cue_window(*cues[len(embs)], limit if final else total)
             if b > limit and not final:
                 break
-            embs[done] = speakers.embed_window(buf[:have], a, b)
-            done += 1
+            embs.append(speakers.embed_window(buf[:have], a, b))
+        done = len(embs)
         if final or time.time() - last < PARTIAL_EVERY or done < PARTIAL_MIN_LINES:
             return
         last = time.time()
         if progress:
-            progress(done / len(cues))
+            progress(min(1.0, limit / total) if find else done / len(cues))
         if partial:
-            labels, sims = speakers.label_cues(embs[:done], cues[:done], vps)
+            labels, sims = speakers.label_cues(np.stack(embs), cues[:done], vps)
             n = done - PARTIAL_HOLD_BACK
             partial({"upto": round(cues[n - 1][1], 2),
                      "skip": _skips(cues[:n], labels[:n], sims[:n], names)})
@@ -140,9 +146,15 @@ def analyze_streaming(download, cues, progress=None, partial=None) -> dict:
             buf = np.concatenate([buf, np.zeros(len(buf) // 4 + len(chunk), dtype=np.float32)])
         buf[have:have + len(chunk)] = chunk
         have += len(chunk)
+        if find:
+            cues.extend(find.feed(chunk))
         advance()
+    if find:
+        cues.extend(find.flush())
     advance(final=True)
-    return _transcript_result(embs, cues, have / sr)
+    if not cues:
+        raise ValueError("no speech found")
+    return _transcript_result(np.stack(embs), cues, have / sr, "speech" if find else "transcript")
 
 
 def result_path(video_id: str) -> Path:
@@ -162,7 +174,8 @@ def analyze_video(video_id: str, status=None, keep_audio=False, method="auto", p
 
     method "auto" uses the transcript when the video has one, analyzing while the audio
     downloads and reporting early skip ranges through `partial`; without a transcript it
-    falls back to full diarization. "full" forces that slow method."""
+    finds the spoken lines by loudness instead, still while downloading. "full" forces
+    full diarization, the slow method, which is also the fallback if the fast ones fail."""
     status = status or (lambda *_: None)
     status("downloading", 0.0)
     download = audio.Download(video_id, AUDIO_DIR)
@@ -174,7 +187,7 @@ def analyze_video(video_id: str, status=None, keep_audio=False, method="auto", p
             cues, note = None, f"transcript unavailable: {e}"
     download.start()
     result = None
-    if cues:
+    if method != "full":
         status("analyzing", 0.0)
         try:
             result = analyze_streaming(download, cues, progress=lambda p: status("analyzing", p), partial=partial)
@@ -190,7 +203,7 @@ def analyze_video(video_id: str, status=None, keep_audio=False, method="auto", p
         report = lambda p: status("analyzing", p)
         if cues:
             result = analyze_transcript(samples, cues, progress=report)
-        else:
+        else:  # the slow, thorough method: asked for, or the fast one failed
             result = analyze(samples, progress=report)
             result["method"] = "full"
     result["note"] = note
