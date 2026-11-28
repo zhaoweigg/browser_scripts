@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 MODELS = ROOT / "models"
 SEG_MODEL = MODELS / "sherpa-onnx-pyannote-segmentation-3-0" / "model.onnx"
 EMB_MODEL = MODELS / "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
-VOICEPRINTS = ROOT / "data" / "voiceprints"
+VOICEPRINTS = ROOT / "voiceprints"  # checked in, so a fresh clone recognises the same people
 
 NUM_THREADS = 6
 # Cosine similarity a speaker must reach against a voiceprint to be labelled as that person.

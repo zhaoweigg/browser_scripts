@@ -52,7 +52,11 @@ uv pip install --python .venv/bin/python "yt-dlp[default]" sherpa-onnx av numpy 
 ./install-helper.sh          # starts now and on login; logs to data/helper.log
 ```
 
-Enroll voices from videos where that person is the main speaker (their own channel):
+The voiceprints of the three hosts are included in `voiceprints/` (one 192-number file per
+person, under 1 KB each), so nothing needs enrolling to use it as is.
+
+To add a person or rebuild one, enroll from videos where that person is the main speaker
+(their own channel). These are the commands the included voiceprints were made with:
 
 ```bash
 .venv/bin/python -m speaker_skip enroll 伍雷 A-Mf1oaELIw auIe60tibgY
