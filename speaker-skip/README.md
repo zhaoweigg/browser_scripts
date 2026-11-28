@@ -72,9 +72,10 @@ the enrolled voice name. The helper computes skip ranges for every enrolled voic
 
 In `speaker_skip/speakers.py`:
 
-- `skip_ranges(...)`: `min_len` (shortest stretch worth skipping, default 2 s), `merge_gap`
-  (pauses bridged inside one turn), `other_min` (how long someone else must talk to cut a
-  skip short; shorter "嗯/对" back-channels are ignored).
+- `skip_ranges(...)`: `min_len` (shortest stretch worth skipping, default 2 s), `other_min`
+  (how long someone else must talk to cut a skip short; shorter "嗯/对" back-channels are
+  ignored), and `PAUSE_MAX` (a pause up to this long between two of the person's stretches
+  is skipped with them, as long as nobody else talks in it; default 8 s).
 - Transcript method: `SWITCH_PENALTY` (higher = fewer speaker changes between lines),
   `UNKNOWN_SCORE` (lines matching nobody this well are left alone), `GUEST_*` (when an
   unmatched voice counts as a guest), `ADAPT_*` (which lines may refine a voiceprint, and

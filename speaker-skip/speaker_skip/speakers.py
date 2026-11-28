@@ -95,12 +95,17 @@ def label_speakers(spk_embs, voiceprints, threshold=MATCH_THRESHOLD):
     return labels
 
 
-def skip_ranges(segments, labels, target, merge_gap=1.0, min_len=2.0, other_min=1.0):
+PAUSE_MAX = 8.0  # a pause this long inside the target's turn is skipped along with it
+
+
+def skip_ranges(segments, labels, target, merge_gap=1.0, min_len=2.0, other_min=1.0, pause_max=PAUSE_MAX):
     """Time ranges where `target` talks and nobody else does.
 
     The target's turns are merged across short pauses, then real speech from anyone
-    else (turns >= other_min seconds; short "嗯/对" back-channels are ignored) is cut out,
-    and leftovers shorter than min_len are dropped so a quick interjection isn't skipped.
+    else (turns >= other_min seconds; short "嗯/对" back-channels are ignored) is cut out.
+    Pieces separated only by a pause (up to pause_max seconds in which nobody else talks)
+    are joined, so the dead air between two skips isn't played. Leftovers shorter than
+    min_len are dropped so a quick interjection isn't skipped.
     """
     mine = sorted((s, e) for s, e, spk in segments if labels.get(spk, (None,))[0] == target)
     others = sorted((s, e) for s, e, spk in segments
@@ -129,8 +134,16 @@ def skip_ranges(segments, labels, target, merge_gap=1.0, min_len=2.0, other_min=
                 if oe < pe:
                     nxt.append((oe, pe))
             pieces = nxt
-        result.extend(p for p in pieces if p[1] - p[0] >= min_len)
-    return [[round(s, 2), round(e, 2)] for s, e in result]
+        result.extend(pieces)
+
+    joined = []
+    for s, e in sorted(result):
+        if (joined and s - joined[-1][1] <= pause_max
+                and not any(os_ < s and oe > joined[-1][1] for os_, oe in others)):
+            joined[-1][1] = max(joined[-1][1], e)
+        else:
+            joined.append([s, e])
+    return [[round(s, 2), round(e, 2)] for s, e in joined if e - s >= min_len]
 
 
 # ---------- transcript-based labelling ----------

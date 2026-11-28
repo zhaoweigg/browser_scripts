@@ -8,7 +8,7 @@ import numpy as np
 
 from . import audio, speakers, transcript
 
-RESULT_VERSION = 4  # bump when analysis changes, so cached results get redone
+RESULT_VERSION = 5  # bump when analysis changes, so cached results get redone
 
 ROOT = speakers.ROOT
 DATA = ROOT / "data"
